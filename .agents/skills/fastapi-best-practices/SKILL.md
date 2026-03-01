@@ -1,12 +1,6 @@
 ---
 name: fastapi-best-practices
-description: Enforces FastAPI best practices: async/sync correctness, domain-driven structure, Pydantic validation, dependency injection, production hardening, and structured logging. Trigger: When creating or modifying FastAPI endpoints, services, dependencies, routers, or any backend Python code that uses FastAPI.
-license: MIT
-metadata:
-  author: klezya
-  version: "1.0"
-  scope: [backend]
-  auto_invoke: "FastAPI development, backend API creation, Python web API"
+description: "Enforces FastAPI best practices: async/sync correctness, domain-driven structure, Pydantic validation, dependency injection, production hardening, and structured logging. Trigger: When creating or modifying FastAPI endpoints, services, dependencies, routers, or any backend Python code that uses FastAPI."
 ---
 
 ## When to Use
@@ -26,9 +20,9 @@ metadata:
 | Python | 3.12+ | 3.8 dropped in FastAPI 0.125.0 |
 | FastAPI | 0.133.1 | |
 | Pydantic | 2.12.5 | v1 removed in FastAPI 0.128.0 |
-| SQLAlchemy | 2.0.47 | |
+| **SQLModel** | 0.0.37 | **Primary ORM** — unifies Pydantic + SQLAlchemy |
+| SQLAlchemy | 2.0.47 | Fallback only — requires user consent (see below) |
 | Uvicorn | 0.41.0 | |
-| SQLModel | 0.0.37 | |
 | python-jose | 3.5.0 | |
 | Package manager | **uv** | Always prefer `uv` over `pip` |
 | Event loop | **uvloop** | Always install as project dependency |
@@ -41,7 +35,8 @@ metadata:
 
 | Rule | Reason |
 |------|--------|
-| Separate Pydantic schemas from SQLAlchemy models | Different jobs, different files |
+| Use **SQLModel** as the primary ORM | Unifies Pydantic schemas + SQLAlchemy models — no duplication |
+| Fall back to raw SQLAlchemy **only with user consent** | Complex queries that SQLModel can't express cleanly; must be explicitly approved and commented |
 | Use `async def` **only** for non-blocking I/O | Database async drivers, `httpx`, `aiofiles` |
 | Use `def` for any blocking operation | `time.sleep`, `requests`, sync DB clients, file I/O with sync libs |
 | Validate with `Pydantic Field()` | Constraints, defaults, descriptions — all in the schema |
@@ -68,6 +63,59 @@ metadata:
 | Never use `@app.on_event("startup")` / `@app.on_event("shutdown")` | Use `lifespan` context manager |
 | Never use Swagger/OpenAPI/ReDoc in production | Disable unless explicitly required (e.g., public APIs) |
 | Never log sensitive data | No API keys, DB passwords, tokens, or secrets in logs |
+
+---
+
+## SQLModel vs SQLAlchemy — Strategy
+
+**Default: use SQLModel for everything.**
+SQLModel (by the same author as FastAPI) was designed to eliminate the duplication between Pydantic schemas and SQLAlchemy models. It is the first choice for all table definitions, relationships, and request/response schemas.
+
+> **Official example**: See [assets/sqlmodel_official_example.py](assets/sqlmodel_official_example.py) for a complete CRUD API using SQLModel with session DI, `select()`, pagination, and HTTP error handling — sourced from the [FastAPI official docs](https://fastapi.tiangolo.com/tutorial/sql-databases/#create-models).
+
+```
+Does SQLModel handle this use case?
+├── YES → Use SQLModel (default)
+│
+└── NO (complex raw SQL, advanced ORM feature, or SQLModel limitation)
+    ├── Stop and inform the user:
+    │   "This requires a raw SQLAlchemy feature that SQLModel doesn't expose cleanly.
+    │    I need your approval to write pure SQLAlchemy code here."
+    ├── Wait for explicit user confirmation
+    └── Add a mandatory comment at the exact function/class:
+        # SQLALCHEMY FALLBACK — approved by user on <date>
+        # Reason: <why SQLModel was insufficient>
+```
+
+```python
+# ✅ DEFAULT: SQLModel for all models and schemas
+from sqlmodel import SQLModel, Field, Relationship
+
+class User(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    name: str = Field(..., min_length=2, max_length=100)
+    email: str = Field(..., max_length=255)
+    items: list["Item"] = Relationship(back_populates="owner")
+
+class UserCreate(SQLModel):       # Request schema — no `table=True`
+    name: str = Field(..., min_length=2, max_length=100)
+    email: str
+
+class UserOut(SQLModel):          # Response schema — no `table=True`
+    id: int
+    name: str
+    email: str
+
+
+# ⚠️ FALLBACK (user-approved only): pure SQLAlchemy
+# SQLALCHEMY FALLBACK — approved by user on 2026-03-01
+# Reason: complex window function not supported by SQLModel query API
+from sqlalchemy import select, func, over
+stmt = select(
+    User,
+    func.rank().over(order_by=User.created_at.desc()).label("rank"),
+)
+```
 
 ---
 
@@ -326,23 +374,62 @@ logger.info("DB connected", extra={"password": settings.db_password})  # NEVER
 
 ---
 
-## Production Deployment
+## Running the Server
+
+### Development — `fastapi dev` (official CLI, recommended)
 
 ```bash
-# Install with uv
-uv add gunicorn uvicorn[standard] uvloop
+# Auto-reload enabled, listens on 127.0.0.1 only
+uv run fastapi dev src/main.py
+```
 
-# Run with gunicorn + uvicorn workers
-# Formula: workers = (CPU cores × 2) + 1 (recommended, not mandatory)
+- Hot-reload on code changes (resource-intensive, dev only)
+- Binds to `127.0.0.1:8000` (localhost only — not publicly accessible)
+- Swagger docs enabled by default
+
+### Production — `fastapi run` (official CLI, recommended)
+
+```bash
+# Single process — use this inside containers (Docker, Kubernetes, etc.)
+# Scale horizontally by running more container replicas instead
+uv run fastapi run src/main.py
+
+# Multiple workers — only for bare-metal / VM deployments (NOT for Docker/Kubernetes/containers)
+# When using containers, keep 1 process per container and scale with replicas
+# Formula: workers = (CPU cores × 2) + 1  (recommended, not mandatory)
+uv run fastapi run src/main.py --workers 5
+```
+
+- Auto-reload disabled
+- Binds to `0.0.0.0:8000` (publicly accessible)
+- Manages workers automatically without Gunicorn
+- Preferred for new projects
+
+### Production — Legacy (Gunicorn + UvicornWorker)
+
+> **Not recommended for Docker/Kubernetes/containers.** Use a single process per container and scale with replicas instead. Gunicorn multi-worker is only appropriate for bare-metal or VM deployments.
+
+```bash
+# Install gunicorn if not present
+uv add gunicorn
+
+# Run with uvicorn workers — bare-metal / VM only (NOT for Docker/Kubernetes/containers)
+# Formula: workers = (CPU cores × 2) + 1  (recommended, not mandatory)
 gunicorn src.main:app \
     --workers 5 \
     --worker-class uvicorn.workers.UvicornWorker \
     --bind 0.0.0.0:8000
 ```
 
-- Always install `uvloop` for better event loop performance
-- Use `gunicorn` with `UvicornWorker` in production
-- Workers formula: `(CPU cores × 2) + 1` — recommended guideline, adjust to your workload
+- Valid and battle-tested alternative
+- Preferred when Gunicorn's process management features are needed (graceful reload, advanced signals, etc.)
+- Workers formula: `(CPU cores × 2) + 1` — same guideline applies
+
+> **Choose `fastapi run --workers`** for new projects (bare-metal/VM only).
+> Choose **Gunicorn** when you need its advanced process manager features or your infra already depends on it.
+> **Using containers?** Keep `--workers 1` (or omit it) and scale horizontally with replicas.
+
+- Always install `uvloop` as a project dependency for better event loop performance
 
 ---
 
@@ -388,7 +475,11 @@ my-api/
 
 **Rules:**
 - One domain = one folder with its own router, schemas, models, service, dependencies
-- Schemas (Pydantic) and Models (SQLAlchemy) are **always separate files**
+- **SQLModel is the default** — `models.py` holds SQLModel classes (both table models and schemas)
+  - `class User(SQLModel, table=True)` → DB table
+  - `class UserCreate(SQLModel)` / `class UserOut(SQLModel)` → request/response schemas in the same file
+- Only split into separate `schemas.py` + `models.py` if the domain grows complex enough to justify it
+- If raw SQLAlchemy is needed anywhere, it requires user approval and a comment (see SQLModel vs SQLAlchemy section)
 - Business logic lives in `service.py`, never in `router.py`
 - Cross-domain shared code goes in `shared/`
 
@@ -422,16 +513,31 @@ uv init my-api
 cd my-api
 
 # Add core dependencies
-uv add fastapi uvicorn[standard] uvloop pydantic-settings sqlalchemy[asyncio] asyncpg
+uv add "fastapi[standard]" uvloop uvloop pydantic-settings sqlmodel asyncpg
 
 # Add dev dependencies
 uv add --dev pytest pytest-asyncio httpx ruff
 
-# Run development server
-uv run uvicorn src.main:app --reload --port 8000
+# ── Development ──────────────────────────────────────────────────────────────
+# Official FastAPI CLI (recommended)
+uv run fastapi dev src/main.py
 
-# Run production server
-uv run gunicorn src.main:app --workers 5 --worker-class uvicorn.workers.UvicornWorker --bind 0.0.0.0:8000
+# Legacy uvicorn (still valid)
+uv run uvicorn src.main:app --reload --host 127.0.0.1 --port 8000
+
+# ── Production ───────────────────────────────────────────────────────────────
+# Official FastAPI CLI — single process (containers: Docker, Kubernetes)
+uv run fastapi run src/main.py
+
+# Official FastAPI CLI — multiple workers (bare-metal / VMs)
+# workers = (CPU cores × 2) + 1
+uv run fastapi run src/main.py --workers 5
+
+# Legacy Gunicorn + UvicornWorker (when advanced process management is needed)
+uv run gunicorn src.main:app \
+    --workers 5 \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --bind 0.0.0.0:8000
 ```
 
 ---
@@ -450,4 +556,11 @@ Before writing any endpoint, verify:
 - [ ] Business logic in service layer, not in router
 - [ ] No hardcoded secrets or env vars
 - [ ] Structured logging, no `print()`
+
+---
+
+## Resources
+
+- **Official SQLModel CRUD example**: See [assets/sqlmodel_official_example.py](assets/sqlmodel_official_example.py) — complete CRUD with session DI, `select()`, pagination, and 404 handling
+- **FastAPI SQL databases guide**: https://fastapi.tiangolo.com/tutorial/sql-databases/#create-models
 
