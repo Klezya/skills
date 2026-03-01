@@ -1,7 +1,13 @@
 # Copilot Skills Registry
 
-This repository contains personal skills for GitHub Copilot CLI.
-Install any skill with: `copilot /skills install <skill-name>`
+This repository is the centralized source of personal skills for GitHub Copilot CLI.
+
+**Install skills with symlinks:**
+```bash
+./install.sh --global                           # All skills → ~/.agents/skills/
+./install.sh --target /path/to/project s1 s2    # Specific skills → project
+./install.sh --list                             # List available skills
+```
 
 ---
 
@@ -48,6 +54,6 @@ Install any skill with: `copilot /skills install <skill-name>`
 
 ## Adding a New Skill
 
-1. Run `copilot /skills` and follow the prompts, or
-2. Manually create `.agents/skills/{skill-name}/SKILL.md` following the [skill-creator](..agents/skills/skill-creator/SKILL.md) guidelines
-3. Register it in the table above
+1. Create `.agents/skills/{skill-name}/SKILL.md` following the [skill-creator](.agents/skills/skill-creator/SKILL.md) guidelines
+2. Register it in the table above
+3. Run `./install.sh --global` to symlink globally, or `./install.sh --target /path` for a specific project
