@@ -1,14 +1,11 @@
-````skill
 ---
 name: fastapi-best-practices
-description: >
-  Enforces FastAPI best practices: async/sync correctness, domain-driven structure, Pydantic validation, dependency injection, production hardening, and structured logging.
-  Trigger: When creating or modifying FastAPI endpoints, services, dependencies, routers, or any backend Python code that uses FastAPI.
+description: Enforces FastAPI best practices: async/sync correctness, domain-driven structure, Pydantic validation, dependency injection, production hardening, and structured logging. Trigger: When creating or modifying FastAPI endpoints, services, dependencies, routers, or any backend Python code that uses FastAPI.
 license: MIT
 metadata:
   author: klezya
   version: "1.0"
-  scope: [root]
+  scope: [backend]
   auto_invoke: "FastAPI development, backend API creation, Python web API"
 ---
 
@@ -454,4 +451,3 @@ Before writing any endpoint, verify:
 - [ ] No hardcoded secrets or env vars
 - [ ] Structured logging, no `print()`
 
-````
