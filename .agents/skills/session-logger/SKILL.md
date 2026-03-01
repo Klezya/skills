@@ -1,14 +1,6 @@
 ---
 name: session-logger
-description: >
-  Maintains a daily session log (sessions/YYYY-MM-DD.md) per project recording objectives,
-  changed files, and summaries to help Copilot CLI resume context across sessions.
-  Trigger: At the start of any session, after any file change, or when user says "update session",
-  "log this", "end session", or "what were we doing".
-license: Apache-2.0
-metadata:
-  author: klezya
-  version: "1.0"
+description: "Maintains a daily session log (sessions/YYYY-MM-DD.md) per project recording objectives, changed files, and summaries to help Copilot CLI resume context across sessions. Trigger: At the start of any session, after any file change, or when user says 'update session','log this', 'end session', or 'what were we doing'."
 ---
 
 ## When to Use
