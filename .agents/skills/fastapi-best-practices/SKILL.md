@@ -139,6 +139,24 @@ Is the operation blocking?
 
 **This rule applies equally to endpoints, dependencies, and background tasks.**
 
+### Common Mistake: `async def` + sync DB session
+
+```python
+# ❌ BAD: sync DB call inside async def — BLOCKS the event loop
+@router.post("/login")
+async def login(body: LoginRequest, session: Session = Depends(get_session)):
+    token = login_user(body.email, body.password, session)  # sync DB queries!
+    return {"access_token": token}
+
+# ✅ GOOD: use `def` — FastAPI runs it in a threadpool automatically
+@router.post("/login")
+def login(body: LoginRequest, session: Session = Depends(get_session)):
+    token = login_user(body.email, body.password, session)
+    return {"access_token": token}
+```
+
+> If your SQLModel/SQLAlchemy session is **synchronous**, the endpoint **must** be `def` (not `async def`). FastAPI automatically runs `def` endpoints in a threadpool, preventing event loop blocking.
+
 ---
 
 ## Heavy Computation Policy
@@ -203,6 +221,34 @@ async def get_user(user_id: int, db: AsyncSession = Depends(get_db)):
     return user  # ← FastAPI handles validation & serialization
 ```
 
+### Hiding Sensitive Fields via response_model
+
+`response_model` automatically excludes fields not present in the schema — use this to hide passwords, internal IDs, etc. instead of manual serialization:
+
+```python
+class User(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    email: str
+    password_hash: str           # sensitive — should never be in responses
+    role: UserRole               # str Enum — Pydantic v2 serializes to string value automatically
+
+class UserResponse(SQLModel):    # only safe fields
+    id: int
+    email: str
+    role: str                    # UserRole(str, Enum) → serialized as "admin", "editor", etc.
+
+# ❌ BAD: manual mapping with .from_user() or list comprehension
+@router.get("/users", response_model=list[UserResponse])
+def list_users(session: SessionDep):
+    users = get_users(session)
+    return [UserResponse.from_user(u) for u in users]  # ← unnecessary
+
+# ✅ GOOD: return raw User objects — response_model filters out password_hash
+@router.get("/users", response_model=list[UserResponse])
+def list_users(session: SessionDep):
+    return get_users(session)  # ← password_hash excluded automatically
+```
+
 ---
 
 ## Validation — Always in Pydantic
@@ -265,16 +311,42 @@ async def update_item(
 
 ## Database Connections — Pool via DI
 
-```python
-# ❌ BAD: creating connection per request
-@router.get("/users")
-async def get_users():
-    engine = create_async_engine("postgresql+asyncpg://...")
-    async with AsyncSession(engine) as session:
-        ...
+### Sync (SQLModel default)
 
-# ✅ GOOD: connection pool + dependency injection
-# src/database.py
+Use `def` routes — FastAPI runs them in a threadpool automatically. **Never** use `async def` with a sync session.
+
+```python
+# ✅ GOOD: sync SQLModel session (use with `def` routes)
+# core/database.py
+from typing import Annotated
+from fastapi import Depends
+from sqlmodel import Session, create_engine
+from src.config import settings
+
+engine = create_engine(
+    settings.database_url,
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+)
+
+def get_session():
+    with Session(engine) as session:
+        yield session
+
+# Annotated alias → cleaner signatures across services and routers
+SessionDep = Annotated[Session, Depends(get_session)]
+```
+
+> **Full CRUD example with `SessionDep`, `model_dump(exclude_unset=True)`, and proper HTTP status codes**: see [assets/sqlmodel_sync_crud.py](assets/sqlmodel_sync_crud.py)
+
+### Async (asyncpg)
+
+Use `async def` routes only when using an async DB driver.
+
+```python
+# ✅ GOOD: async SQLAlchemy session (use with `async def` routes)
+# core/database.py
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from src.config import settings
 
@@ -288,7 +360,51 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 ---
 
-## Lifespan — App-Level Resources
+## JWT Authentication & Role-Based Access Control
+
+Use `HTTPBearer` + a `verify_token` dependency + a parameterized `RoleChecker` class.
+
+```python
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+import jwt
+
+security = HTTPBearer()
+
+def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
+    token = credentials.credentials
+    try:
+        return jwt.decode(token, PUBLIC_KEY, algorithms=["RS256"])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token has expired",
+                            headers={"WWW-Authenticate": "Bearer"})
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token",
+                            headers={"WWW-Authenticate": "Bearer"})
+
+
+class RoleChecker:
+    """Parameterized dependency for role-based access control."""
+    def __init__(self, allowed_roles: list[str]) -> None:
+        self.allowed_roles = set(allowed_roles)  # O(1) lookup
+
+    def __call__(self, payload: dict = Depends(verify_token)) -> dict:
+        if not (set(payload.get("roles", [])) & self.allowed_roles):
+            raise HTTPException(status_code=403, detail="Insufficient permissions")
+        return payload  # return payload so routes can access user context
+
+# Define once, reuse across routers
+require_admin  = RoleChecker(["admin"])
+require_editor = RoleChecker(["admin", "editor"])
+
+@router.delete("/{item_id}", status_code=204)
+def delete_item(item_id: int, payload: dict = Depends(require_admin)):
+    ...
+```
+
+> **Complete example with RS256, HS256 setup, and role guard instances**: see [assets/jwt_auth_roles.py](assets/jwt_auth_roles.py)
+
+---
 
 ```python
 # ❌ BAD: deprecated event handlers
@@ -315,6 +431,71 @@ app = FastAPI(lifespan=lifespan)
 
 ---
 
+## Global Exception Handler — Production Safety
+
+Prevent stack traces and internal details from leaking to clients. Always add a catch-all handler in production:
+
+```python
+import logging
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled exception on %s %s", request.method, request.url.path)
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "Internal server error"},
+    )
+```
+
+> This logs the full traceback server-side (for debugging) while returning a generic message to the client (OWASP A02 compliance).
+
+---
+
+## Exception Factories — Organized Error Responses
+
+Group related HTTP exceptions by domain using factory classes. This centralizes error messages, avoids scattered `HTTPException(...)` calls, and keeps responses consistent:
+
+```python
+from fastapi import HTTPException, status
+
+class AuthExceptions:
+    @staticmethod
+    def expired_token():
+        return HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    @staticmethod
+    def insufficient_permissions():
+        return HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Insufficient permissions",
+        )
+
+class UserExceptions:
+    @staticmethod
+    def not_found():
+        return HTTPException(status_code=404, detail="User not found")
+
+    @staticmethod
+    def duplicate_email():
+        return HTTPException(status_code=400, detail="Email already registered")
+
+# Usage in services:
+raise AuthExceptions.expired_token()
+raise UserExceptions.duplicate_email()
+```
+
+> **Complete example with `TokenExceptions` and `LoginExceptions`**: see [assets/exception_factories.py](assets/exception_factories.py)
+
+---
+
 ## Configuration — Never Hardcode Secrets
 
 ```python
@@ -333,6 +514,43 @@ class Settings(BaseSettings):
     database_url: str
     secret_key: str
     allowed_origins: list[str] = ["https://myapp.com"]
+
+settings = Settings()
+```
+
+### Advanced: Validators for env parsing + DEBUG overrides
+
+```python
+import json
+from pydantic import field_validator, model_validator
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env")
+
+    DEBUG: bool = False
+    DATABASE_URL: str
+    DATABASE_ECHO: bool = False
+    CORS_ORIGINS: list[str] = ["https://myapp.com"]
+
+    @field_validator("CORS_ORIGINS", mode="before")
+    @classmethod
+    def parse_cors_origins(cls, v):
+        """Parse CORS_ORIGINS from JSON string in .env (e.g. '["http://localhost:3000"]')"""
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except json.JSONDecodeError:
+                return [v]
+        return v
+
+    @model_validator(mode="after")
+    def apply_debug_overrides(self):
+        """In DEBUG mode: open CORS, enable SQL echo"""
+        if self.DEBUG:
+            self.CORS_ORIGINS = ["*"]
+            self.DATABASE_ECHO = True
+        return self
 
 settings = Settings()
 ```
@@ -562,5 +780,9 @@ Before writing any endpoint, verify:
 ## Resources
 
 - **Official SQLModel CRUD example**: See [assets/sqlmodel_official_example.py](assets/sqlmodel_official_example.py) — complete CRUD with session DI, `select()`, pagination, and 404 handling
+- **Sync CRUD with SessionDep + PATCH pattern**: See [assets/sqlmodel_sync_crud.py](assets/sqlmodel_sync_crud.py) — service layer, `model_dump(exclude_unset=True)`, proper status codes
+- **Eager loading (SQLAlchemy fallback)**: See [assets/sqlmodel_eager_loading.py](assets/sqlmodel_eager_loading.py) — `selectinload` + `load_only` for N+1 prevention
+- **JWT auth + RoleChecker**: See [assets/jwt_auth_roles.py](assets/jwt_auth_roles.py) — `HTTPBearer`, token verification, parameterized role guards
+- **Exception factories**: See [assets/exception_factories.py](assets/exception_factories.py) — domain-grouped `HTTPException` factories with `AuthExceptions`, `LoginExceptions`, and generic `ResourceExceptions`
 - **FastAPI SQL databases guide**: https://fastapi.tiangolo.com/tutorial/sql-databases/#create-models
 
