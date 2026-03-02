@@ -37,13 +37,7 @@ skills/{skill-name}/
 ```markdown
 ---
 name: {skill-name}
-description: >
-  {One-line description of what this skill does}.
-  Trigger: {When the AI should load this skill}.
-license: Apache-2.0
-metadata:
-  author: prowler-cloud
-  version: "1.0"
+description: "{One-line description of what this skill does}. Trigger: {When the AI should load this skill}."
 ---
 
 ## When to Use

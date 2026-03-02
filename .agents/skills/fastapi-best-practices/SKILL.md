@@ -18,14 +18,14 @@ description: "Enforces FastAPI best practices: async/sync correctness, domain-dr
 | Package | Version | Notes |
 |---------|---------|-------|
 | Python | 3.12+ | 3.8 dropped in FastAPI 0.125.0 |
-| FastAPI | 0.133.1 | |
-| Pydantic | 2.12.5 | v1 removed in FastAPI 0.128.0 |
-| **SQLModel** | 0.0.37 | **Primary ORM** — unifies Pydantic + SQLAlchemy |
-| SQLAlchemy | 2.0.47 | Fallback only — requires user consent (see below) |
-| Uvicorn | 0.41.0 | |
-| python-jose | 3.5.0 | |
+| FastAPI | 0.135+ | |
+| Pydantic | 2.12+ | v1 removed in FastAPI 0.128.0 |
+| **SQLModel** | 0.0.37+ | **Primary ORM** — unifies Pydantic + SQLAlchemy |
+| SQLAlchemy | 2.0+ | Fallback only — requires user consent (see below) |
+| Uvicorn | 0.41+ | |
+| **PyJWT** | 2.x | `import jwt` — actively maintained; do NOT use `python-jose` (unmaintained) |
 | Package manager | **uv** | Always prefer `uv` over `pip` |
-| Event loop | **uvloop** | Always install as project dependency |
+| Event loop | **uvloop** | Always install as project dependency (Linux/macOS only — not available on Windows) |
 
 ---
 
@@ -47,7 +47,7 @@ description: "Enforces FastAPI best practices: async/sync correctness, domain-dr
 | Use `.env` + `pydantic_settings` or `dynaconf` for config | Never hardcode secrets |
 | Use connection pooling via DI | Never create DB connections per request |
 | Use `uv` for package management | Faster, more reliable than pip |
-| Install `uvloop` | Better async event loop performance |
+| Install `uvloop` | Better async event loop performance (Linux/macOS only) |
 
 ### NEVER DO
 
@@ -264,9 +264,10 @@ async def create_user(user: UserCreate, db: AsyncSession = Depends(get_db)):
     ...
 
 # ✅ GOOD: validation in Pydantic schema
-from pydantic import BaseModel, Field, field_validator
+from sqlmodel import SQLModel, Field
+from pydantic import field_validator
 
-class UserCreate(BaseModel):
+class UserCreate(SQLModel):
     name: str = Field(..., min_length=2, max_length=100)
     email: str = Field(..., max_length=255)
 
@@ -317,11 +318,11 @@ Use `def` routes — FastAPI runs them in a threadpool automatically. **Never** 
 
 ```python
 # ✅ GOOD: sync SQLModel session (use with `def` routes)
-# core/database.py
+# src/core/database.py
 from typing import Annotated
 from fastapi import Depends
 from sqlmodel import Session, create_engine
-from src.config import settings
+from src.core.config import settings
 
 engine = create_engine(
     settings.database_url,
@@ -346,9 +347,9 @@ Use `async def` routes only when using an async DB driver.
 
 ```python
 # ✅ GOOD: async SQLAlchemy session (use with `async def` routes)
-# core/database.py
+# src/core/database.py
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
-from src.config import settings
+from src.core.config import settings
 
 engine = create_async_engine(settings.database_url, pool_size=20, max_overflow=10)
 async_session = async_sessionmaker(engine, expire_on_commit=False)
@@ -403,8 +404,11 @@ def delete_item(item_id: int, payload: dict = Depends(require_admin)):
 ```
 
 > **Complete example with RS256, HS256 setup, and role guard instances**: see [assets/jwt_auth_roles.py](assets/jwt_auth_roles.py)
+> **JWT security policy** (token lifetime, refresh rotation, key management): see `web-security` skill.
 
 ---
+
+## Lifespan — App-Level Resources
 
 ```python
 # ❌ BAD: deprecated event handlers
@@ -451,7 +455,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
 ```
 
-> This logs the full traceback server-side (for debugging) while returning a generic message to the client (OWASP A02 compliance).
+> This logs the full traceback server-side (for debugging) while returning a generic message to the client (OWASP A05 compliance). For full OWASP coverage, see `web-security` skill.
 
 ---
 
@@ -560,7 +564,7 @@ settings = Settings()
 ## Disable Docs in Production
 
 ```python
-from src.config import settings
+from src.core.config import settings
 
 app = FastAPI(
     title=settings.app_name,
@@ -581,6 +585,11 @@ app = FastAPI(
 # ✅ GOOD: structured logging with loguru
 from loguru import logger
 
+logger.info("User created: user_id={user_id}, email={email}", user_id=user.id, email=user.email)
+
+# ✅ GOOD: structured logging with stdlib logging
+import logging
+logger = logging.getLogger(__name__)
 logger.info("User created", extra={"user_id": user.id, "email": user.email})
 
 # ❌ BAD: print statements
@@ -660,8 +669,11 @@ my-api/
 ├── src/
 │   ├── __init__.py
 │   ├── main.py               # FastAPI app initialization + lifespan
-│   ├── config.py             # Settings via pydantic_settings
-│   ├── database.py           # Engine, session factory, get_db dependency
+│   │
+│   ├── core/                 # Shared infrastructure
+│   │   ├── __init__.py
+│   │   ├── config.py         # Settings via pydantic_settings
+│   │   └── database.py       # Engine, session factory, get_db dependency
 │   │
 │   ├── auth/                 # Auth domain
 │   │   ├── __init__.py
@@ -693,6 +705,7 @@ my-api/
 
 **Rules:**
 - One domain = one folder with its own router, schemas, models, service, dependencies
+- **`core/`** holds shared infrastructure: `config.py` (pydantic-settings) and `database.py` (engine, session factory) — only `main.py` and `__init__.py` remain at the `src/` root
 - **SQLModel is the default** — `models.py` holds SQLModel classes (both table models and schemas)
   - `class User(SQLModel, table=True)` → DB table
   - `class UserCreate(SQLModel)` / `class UserOut(SQLModel)` → request/response schemas in the same file
@@ -730,8 +743,8 @@ app.add_middleware(
 uv init my-api
 cd my-api
 
-# Add core dependencies
-uv add "fastapi[standard]" uvloop uvloop pydantic-settings sqlmodel asyncpg
+# Add core dependencies (uvloop: Linux/macOS only — skip on Windows)
+uv add "fastapi[standard]" uvloop pydantic-settings sqlmodel asyncpg
 
 # Add dev dependencies
 uv add --dev pytest pytest-asyncio httpx ruff
@@ -785,4 +798,6 @@ Before writing any endpoint, verify:
 - **JWT auth + RoleChecker**: See [assets/jwt_auth_roles.py](assets/jwt_auth_roles.py) — `HTTPBearer`, token verification, parameterized role guards
 - **Exception factories**: See [assets/exception_factories.py](assets/exception_factories.py) — domain-grouped `HTTPException` factories with `AuthExceptions`, `LoginExceptions`, and generic `ResourceExceptions`
 - **FastAPI SQL databases guide**: https://fastapi.tiangolo.com/tutorial/sql-databases/#create-models
+- **Security hardening (OWASP, rate limiting, headers)**: see `web-security` skill
+- **Deployment (nginx, Docker, TLS, health checks)**: see `production-deployment` skill
 

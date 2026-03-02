@@ -64,6 +64,69 @@ list_skills() {
   echo ""
 }
 
+generate_agents_md() {
+  local target_dir="$1"
+  shift
+  local skills=("$@")
+  local project_root
+  project_root="$(dirname "$(dirname "$target_dir")")"   # project root (two levels up from .agents/skills/)
+  local template="$SCRIPT_DIR/AGENTS.template.md"
+  local dest="$project_root/AGENTS.md"
+
+  if [ ! -f "$template" ]; then
+    echo -e "  ${YELLOW}!${NC} AGENTS.md — template not found, skipping"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$dest")"
+
+  if [ -f "$dest" ]; then
+    echo -e "  ${YELLOW}~${NC} AGENTS.md — already exists, skipping (delete it to regenerate)"
+    return 0
+  fi
+
+  # Build skills table rows
+  local skills_rows=""
+  for skill in "${skills[@]}"; do
+    local desc
+    desc=$(get_skill_description "$skill")
+    skills_rows="${skills_rows}| \`${skill}\` | ${desc} |\n"
+  done
+
+  # Generate from template: replace the example skills table with actual installed skills
+  awk -v rows="$skills_rows" '
+    # After table header line, inject actual skills and skip example rows
+    /^\| Skill / {
+      print
+      getline; print  # print the |-------|---| separator
+      printf "%s", rows
+      skip=1
+      next
+    }
+    # End of table: blank line or --- after skipping example rows
+    skip && (/^$/ || /^---/) { skip=0 }
+    skip { next }
+    { print }
+  ' "$template" > "$dest"
+
+  echo -e "  ${GREEN}✓${NC} AGENTS.md → $dest (generated from template)"
+}
+
+remove_agents_md() {
+  local target_dir="$1"
+  local project_root
+  project_root="$(dirname "$(dirname "$target_dir")")"
+  local dest="$project_root/AGENTS.md"
+
+  if [ -L "$dest" ]; then
+    rm "$dest"
+    echo -e "  ${GREEN}✓${NC} AGENTS.md — removed (was symlink)"
+  elif [ -f "$dest" ]; then
+    rm "$dest"
+    echo -e "  ${GREEN}✓${NC} AGENTS.md — removed"
+  fi
+}
+
 link_skill() {
   local skill="$1"
   local target_dir="$2"
@@ -178,6 +241,7 @@ interactive_mode() {
   for skill in "${selected_skills[@]}"; do
     link_skill "$skill" "$target_dir"
   done
+  generate_agents_md "$target_dir" "${selected_skills[@]}"
 
   echo ""
   echo -e "${GREEN}Done!${NC}"
@@ -246,11 +310,13 @@ if [ "$UNINSTALL" = true ]; then
   for skill in "${SKILLS_ARGS[@]}"; do
     unlink_skill "$skill" "$TARGET_DIR"
   done
+  remove_agents_md "$TARGET_DIR"
 else
   echo -e "${BLUE}Installing to: $TARGET_DIR${NC}\n"
   for skill in "${SKILLS_ARGS[@]}"; do
     link_skill "$skill" "$TARGET_DIR"
   done
+  generate_agents_md "$TARGET_DIR" "${SKILLS_ARGS[@]}"
 fi
 
 echo ""

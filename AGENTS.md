@@ -43,6 +43,22 @@ This repository is the centralized source of personal skills for GitHub Copilot 
 
 ---
 
+## 🔒 Security
+
+| Skill | Trigger | Link |
+|-------|---------|------|
+| `web-security` | Hardening a web API, reviewing security, OWASP compliance | [SKILL.md](.agents/skills/web-security/SKILL.md) |
+
+---
+
+## 🚀 Deployment
+
+| Skill | Trigger | Link |
+|-------|---------|------|
+| `production-deployment` | Deploying, containerizing, configuring nginx/Docker/TLS | [SKILL.md](.agents/skills/production-deployment/SKILL.md) |
+
+---
+
 ## 🧩 Tooling & Workflow
 
 | Skill | Trigger | Link |

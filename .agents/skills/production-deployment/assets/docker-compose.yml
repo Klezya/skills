@@ -1,0 +1,75 @@
+# Full-stack Docker Compose for a Python API.
+#
+# Services:
+#   - app: FastAPI application (internal only)
+#   - db: PostgreSQL 16 with health checks
+#   - nginx: Reverse proxy with TLS termination
+#
+# Usage:
+#   cp .env.example .env    # fill in secrets
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Prerequisites:
+#   - TLS certificates in /etc/letsencrypt/ (see certbot setup)
+#   - Nginx config in ./nginx/conf.d/ (see nginx.conf asset)
+
+services:
+  # ── Application ────────────────────────────────────────────────────────────
+  app:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    expose:
+      - "8000"                          # internal only — nginx handles external traffic
+    depends_on:
+      db:
+        condition: service_healthy      # wait until DB is ready
+    networks:
+      - internal
+
+  # ── Database ───────────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-myapi}
+      POSTGRES_USER: ${POSTGRES_USER:-myapi}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-myapi}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - internal
+
+  # ── Reverse Proxy ──────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"                         # HTTP (redirects to HTTPS)
+      - "443:443"                       # HTTPS
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /var/www/certbot:/var/www/certbot:ro
+    depends_on:
+      - app
+    networks:
+      - internal
+      - external
+
+networks:
+  internal:
+    driver: bridge
+  external:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
